@@ -145,9 +145,18 @@ const ProjectsSection = () => {
                 </CarouselItem>
               ))}
             </CarouselContent>
-            <div className="flex justify-center gap-2 mt-6">
+            <div className="hidden md:flex justify-center gap-2 mt-6">
               <CarouselPrevious className="bg-gray-900 border-gray-700 text-gray-300 hover:bg-red-900/30 hover:text-white" />
               <CarouselNext className="bg-gray-900 border-gray-700 text-gray-300 hover:bg-red-900/30 hover:text-white" />
+            </div>
+            {/* Swipe Indicator für mobile Geräte */}
+            <div className="flex md:hidden justify-center mt-6">
+              <div className="flex space-x-2 items-center">
+                <span className="text-gray-400 text-sm">Wischen für mehr</span>
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-gray-400 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </div>
             </div>
           </Carousel>
         </motion.div>
