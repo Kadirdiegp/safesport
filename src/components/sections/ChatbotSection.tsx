@@ -1,106 +1,319 @@
 "use client";
 
-import { useState } from 'react';
-import { motion } from 'framer-motion';
+import { useState, useEffect, useRef } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
+import { createChatCompletion, type ChatMessage } from '@/lib/deepseek-api';
+import { findAnswer } from '@/lib/chatbot-knowledge';
+import { FaPaperPlane, FaGraduationCap, FaRocket, FaCalendarAlt, FaCode, FaUsers } from 'react-icons/fa';
+import { IoMdInformation } from 'react-icons/io';
+import { HiChatBubbleLeftRight } from 'react-icons/hi2';
+import { IoClose } from 'react-icons/io5';
+
+// Komponente für Typewriter-Effekt
+const TypewriterText = ({ text }: { text: string }) => {
+  const [displayedText, setDisplayedText] = useState('');
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [isDone, setIsDone] = useState(false);
+  
+  useEffect(() => {
+    if (currentIndex < text.length) {
+      const timer = setTimeout(() => {
+        setDisplayedText(prev => prev + text[currentIndex]);
+        setCurrentIndex(currentIndex + 1);
+      }, 15); // Geschwindigkeit des Typewriter-Effekts
+      
+      return () => clearTimeout(timer);
+    } else {
+      setIsDone(true);
+    }
+  }, [currentIndex, text]);
+  
+  return (
+    <div className="whitespace-pre-wrap">
+      {isDone ? text : displayedText}
+      {!isDone && <span className="inline-block w-2 h-4 bg-red-500 ml-1 animate-pulse"></span>}
+    </div>
+  );
+};
 
 const ChatbotSection = () => {
-  const [messages, setMessages] = useState<Array<{type: 'user' | 'bot', text: string}>>([
-    { type: 'bot', text: 'Hallo! Ich bin der Uni-Projekte Assistant. Ich kann dir derzeit nur einfache Antworten geben, da ich auf die Integration der DeepseekAI-API warte. Wie kann ich dir helfen?' }
+  // Benutzerstatus
+  const [messages, setMessages] = useState<Array<{type: 'user' | 'bot', text: string, animate?: boolean}>>([
+    { type: 'bot', text: 'Hallo! Ich bin der Uni-Projekte Assistant.\n\n### **Wobei kann ich dir helfen?**\n- **Projektideen** oder Themenfindung\n- **Anforderungen** oder Abgabefristen\n- **Tipps** zur Umsetzung (Präsentation, Dokumentation, Coding etc.)\n- **Organisation** (Zeitmanagement, Teamarbeit)\n\nFrag einfach konkret nach – ich helfe gern! 😊\n\nWas beschäftigt dich gerade? 🚀', animate: false }
   ]);
-  
   const [inputValue, setInputValue] = useState('');
   const [isOpen, setIsOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  
+  // Automatisches Scrollen und Fokussieren
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const messageContainerRef = useRef<HTMLDivElement>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  // Vorgeschlagene Fragen mit Icons
+  const suggestedQuestions = [
+    { icon: <FaRocket />, text: "Welche Projektideen sind aktuell gefragt?" },
+    { icon: <FaCalendarAlt />, text: "Gibt es wichtige Abgabefristen?" },
+    { icon: <FaCode />, text: "Tipps für die technische Umsetzung?" },
+    { icon: <FaUsers />, text: "Wie organisiere ich mein Projektteam?" }
+  ];
+
+  // Automatisches Scrollen, wenn neue Nachrichten hinzugefügt werden oder während des Typewriter-Effekts
+  useEffect(() => {
+    const scrollToBottom = () => {
+      if (messagesEndRef.current) {
+        messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+      }
+    };
     
-    if (inputValue.trim() === '') return;
+    scrollToBottom();
     
-    // Add user message
-    setMessages(prev => [...prev, { type: 'user', text: inputValue }]);
+    // Weitere periodische Scrolls für die Typewriter-Animation
+    const animatingMessages = messages.some(msg => msg.type === 'bot' && msg.animate);
+    if (animatingMessages) {
+      const intervalId = setInterval(scrollToBottom, 500);
+      return () => clearInterval(intervalId);
+    }
+  }, [messages, isLoading]);
+
+  // Automatisches Fokussieren der Eingabe, wenn der Chat geöffnet wird
+  useEffect(() => {
+    if (isOpen && inputRef.current) {
+      setTimeout(() => {
+        inputRef.current?.focus();
+      }, 300);
+    }
+  }, [isOpen]);
+
+  // Nachricht senden
+  const handleSubmit = async (e: React.FormEvent | null, customMessage?: string) => {
+    if (e) e.preventDefault();
     
-    // Simulate bot response (will be replaced with actual API call in the future)
-    setTimeout(() => {
+    const messageToSend = customMessage || inputValue;
+    if ((messageToSend.trim() === '') || isLoading) return;
+    
+    setError(null);
+    
+    // Benutzer-Nachricht hinzufügen
+    const userMessage = { type: 'user' as const, text: messageToSend, animate: false };
+    setMessages(prev => [...prev, userMessage]);
+    setIsLoading(true);
+    
+    if (!customMessage) setInputValue('');
+    
+    try {
+      // Zuerst in der lokalen Wissensdatenbank nach einer Antwort suchen
+      const localAnswer = findAnswer(messageToSend);
+      
+      if (localAnswer) {
+        // Lokale Antwort gefunden - API-Call überspringen
+        setMessages(prev => [...prev, { 
+          type: 'bot', 
+          text: localAnswer,
+          animate: true
+        }]);
+      } else {
+        // Keine lokale Antwort - API aufrufen
+        // Nachrichten für die API formatieren - nur die letzten 10 Nachrichten senden,
+        // um das Kontextfenster nicht zu überschreiten
+        const recentMessages = messages.slice(-10).concat(userMessage);
+        const apiMessages: ChatMessage[] = recentMessages.map(msg => ({
+          role: msg.type === 'user' ? 'user' : 'assistant',
+          content: msg.text
+        }));
+        
+        // DeepSeek API aufrufen
+        const response = await createChatCompletion(apiMessages);
+        
+        // Bot-Antwort mit Typewriter-Animation hinzufügen
+        setMessages(prev => [...prev, { 
+          type: 'bot', 
+          text: response,
+          animate: true
+        }]);
+      }
+    } catch (error) {
+      console.error('Error calling DeepSeek API:', error);
+      
+      if (error instanceof Error) {
+        setError(error.message);
+      }
+      
       setMessages(prev => [...prev, { 
         type: 'bot', 
-        text: 'Ich bin noch in Entwicklung und warte auf die Integration mit der DeepseekAI-API. Bitte versuche es später noch einmal!' 
+        text: 'Entschuldigung, es gab ein Problem bei der Verarbeitung deiner Anfrage. Bitte versuche es später noch einmal.',
+        animate: true
       }]);
-    }, 1000);
-    
-    setInputValue('');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Vorgeschlagene Frage auswählen
+  const handleSuggestedQuestion = (question: string) => {
+    handleSubmit(null, question);
   };
 
   return (
-    <div className="fixed bottom-6 right-6 z-40 mr-3">
+    <div className="fixed bottom-8 right-8 z-40">
       <Sheet open={isOpen} onOpenChange={setIsOpen}>
         <SheetTrigger asChild>
           <Button 
-            className="h-12 w-12 rounded-full bg-gradient-to-r from-blue-600 to-indigo-700 shadow-lg hover:shadow-xl transition-all"
+            className="h-14 w-14 rounded-full bg-gradient-to-r from-red-700 to-red-900 shadow-lg hover:shadow-xl transition-all flex items-center justify-center"
             aria-label="Chat mit dem Assistenten"
-            style={{ transform: 'translateX(-10px)' }}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
-            </svg>
+            <HiChatBubbleLeftRight className="h-6 w-6 text-white" />
           </Button>
         </SheetTrigger>
+
         <SheetContent 
           side="right"
-          className="w-[90%] sm:max-w-md p-0 flex flex-col h-[80vh] rounded-l-xl overflow-hidden shadow-2xl"
+          className="w-[95%] sm:max-w-md p-0 flex flex-col h-[85vh] rounded-xl overflow-hidden shadow-2xl border-0 mx-2 bg-black bg-opacity-80 backdrop-blur-lg backdrop-filter"
         >
-          <SheetHeader className="bg-gradient-to-r from-blue-600 to-indigo-700 text-white py-4 px-6">
-            <SheetTitle className="text-white">Uni-Projekte Assistant</SheetTitle>
+          {/* Header mit nur einem Schließen-Button */}
+          <SheetHeader className="bg-gradient-to-r from-red-700 to-red-900 py-4 px-6 flex-shrink-0">
+            <div className="flex justify-between items-center">
+              <SheetTitle className="text-white flex items-center">
+                <FaGraduationCap className="mr-2 h-5 w-5" />
+                Uni-Projekte Assistant
+              </SheetTitle>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="text-white hover:bg-red-800 rounded-full h-8 w-8 p-0"
+                onClick={() => setIsOpen(false)}
+              >
+                <IoClose className="h-4 w-4" />
+              </Button>
+            </div>
           </SheetHeader>
           
-          <div className="flex-1 overflow-y-auto p-4 bg-gray-50">
+          {/* Nachrichtenbereich */}
+          <div 
+            className="flex-1 overflow-y-auto p-4 bg-black bg-opacity-70 text-white"
+            ref={messageContainerRef}
+          >
             <div className="space-y-4">
-              {messages.map((message, index) => (
-                <motion.div
-                  key={index}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.3 }}
-                  className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
-                  <div 
-                    className={`max-w-[80%] rounded-lg px-4 py-2 ${
-                      message.type === 'user' 
-                        ? 'bg-blue-600 text-white' 
-                        : 'bg-white text-gray-800 shadow-sm'
-                    }`}
+              <AnimatePresence>
+                {messages.map((message, index) => (
+                  <motion.div
+                    key={index}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.95 }}
+                    transition={{ duration: 0.3 }}
+                    className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
                   >
-                    {message.text}
-                  </div>
-                </motion.div>
-              ))}
+                    <div 
+                      className={`max-w-[85%] rounded-2xl px-4 py-3 ${
+                        message.type === 'user' 
+                          ? 'bg-red-600 text-white shadow-md backdrop-blur-sm bg-opacity-90' 
+                          : 'bg-zinc-800 text-white shadow-sm border border-zinc-700 backdrop-blur-sm bg-opacity-70'
+                      }`}
+                    >
+                      {message.type === 'bot' && message.animate 
+                        ? <TypewriterText text={message.text} /> 
+                        : <div className="whitespace-pre-wrap">{message.text}</div>
+                      }
+                    </div>
+                  </motion.div>
+                ))}
+                
+                {isLoading && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="flex justify-start"
+                  >
+                    <div className="bg-zinc-800 text-white shadow-sm max-w-[85%] rounded-2xl px-4 py-3 flex items-center border border-zinc-700 backdrop-blur-sm bg-opacity-70">
+                      <div className="flex space-x-2">
+                        <div className="w-2 h-2 bg-red-600 rounded-full animate-bounce" style={{ animationDelay: '0s' }}></div>
+                        <div className="w-2 h-2 bg-red-600 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                        <div className="w-2 h-2 bg-red-600 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+
+                {error && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="flex justify-center my-2"
+                  >
+                    <div className="bg-red-900 text-white shadow-sm rounded-lg px-4 py-2 text-xs border border-red-700 flex items-center backdrop-blur-sm">
+                      <IoMdInformation className="mr-1 h-4 w-4 text-red-300" />
+                      {error}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
+            
+            {/* Vorgeschlagene Fragen */}
+            {messages.length < 3 && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.5, duration: 0.5 }}
+                className="mt-6"
+              >
+                <p className="text-sm text-gray-300 mb-2 font-medium">Häufige Fragen:</p>
+                <div className="grid grid-cols-1 gap-2">
+                  {suggestedQuestions.map((question, index) => (
+                    <motion.button
+                      key={index}
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: 0.2 + index * 0.1, duration: 0.3 }}
+                      onClick={() => handleSuggestedQuestion(question.text)}
+                      className="text-sm bg-zinc-800 border border-zinc-700 hover:bg-red-900 hover:border-red-700 text-white rounded-xl px-3 py-2.5 transition-colors duration-200 flex items-center shadow-sm hover:shadow backdrop-blur-sm bg-opacity-50"
+                      disabled={isLoading}
+                    >
+                      <span className="mr-2 text-red-500">{question.icon}</span>
+                      {question.text}
+                    </motion.button>
+                  ))}
+                </div>
+              </motion.div>
+            )}
+            
+            {/* Invisible element for scrolling */}
+            <div ref={messagesEndRef} />
           </div>
           
-          <form 
-            onSubmit={handleSubmit}
-            className="p-4 bg-white border-t border-gray-200 flex gap-2"
-          >
-            <input
-              type="text"
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              placeholder="Stell eine Frage..."
-              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            <Button 
-              type="submit" 
-              className="bg-gradient-to-r from-blue-600 to-indigo-700 hover:opacity-90"
+          {/* Eingabebereich */}
+          <div className="bg-zinc-900 border-t border-zinc-800 p-4">
+            <form 
+              onSubmit={handleSubmit}
+              className="flex gap-2 items-center"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-              </svg>
-            </Button>
-          </form>
-          
-          <div className="p-2 text-center text-xs text-gray-500 bg-white border-t border-gray-200">
-            <p>Powered by DeepseekAI (Coming Soon)</p>
+              <input
+                ref={inputRef}
+                type="text"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                placeholder="Stell eine Frage..."
+                className="flex-1 px-4 py-3 border border-zinc-700 bg-zinc-800 text-white rounded-full focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500 transition-shadow shadow-sm placeholder-gray-400"
+                disabled={isLoading}
+              />
+              <Button 
+                type="submit" 
+                className="bg-gradient-to-r from-red-700 to-red-900 hover:opacity-90 rounded-full p-3 h-12 w-12 flex items-center justify-center shadow-md"
+                disabled={isLoading || inputValue.trim() === ''}
+                aria-label="Nachricht senden"
+              >
+                <FaPaperPlane className="h-4 w-4" />
+              </Button>
+            </form>
+            
+            {/* Footer text */}
+            <div className="mt-2 text-center text-xs text-gray-400">
+              <p>Powered by DeepseekAI • Uni-Projekte Showcase</p>
+            </div>
           </div>
         </SheetContent>
       </Sheet>
